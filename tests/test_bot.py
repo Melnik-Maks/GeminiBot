@@ -154,8 +154,6 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_gift_preview_back_does_not_issue_gift(self):
         oid = await self.new_review()
         await self.event(ADMIN, callback=f"a:pay:{oid}")
-        await self.event(ADMIN, "BANK-1234")
-        await self.event(ADMIN, callback=f"a:gift:{oid}")
         await self.event(ADMIN, "https://example.com/gift/preview")
         confirm = self.panel(ADMIN).reply_markup.inline_keyboard[0][0].callback_data
         back = next(b for row in self.panel(ADMIN).reply_markup.inline_keyboard for b in row if b.text == "← Назад")
@@ -168,11 +166,80 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_media_callback_replaces_message_and_preserves_receipt_record(self):
         oid = await self.new_review()
         receipt = await self.bot.send_photo(ADMIN, "receipt-file", caption="Квитанція")
+        before = len(self.session.calls)
         await self.event(ADMIN, callback=f"a:pay:{oid}", clicked=receipt)
         self.assertNotIn((ADMIN, receipt.message_id), self.session.messages)
         self.assertIsNotNone(self.panel(ADMIN).text)
-        self.assertEqual(self.store.session(ADMIN)[0], "admin_pay")
+        self.assertEqual(self.store.session(ADMIN)[0], "admin_gift")
         self.assertEqual(len(self.store.receipts(ADMIN, oid)), 1)
+        self.assertFalse(any(isinstance(m, (SendPhoto, SendDocument)) for m in self.session.calls[before:]))
+        self.assertEqual(self.store.own_order(BUYER, oid)["status"], "paid")
+
+    async def test_verify_payment_immediately_requests_gift_and_repeated_click_is_safe(self):
+        oid = await self.new_review()
+        await self.event(ADMIN, callback=f"a:order:{oid}")
+        panel = self.panel(ADMIN)
+        pay = next(b.callback_data for row in panel.reply_markup.inline_keyboard for b in row
+                   if b.text == "✅ Перевірив зарахування")
+        self.assertEqual(pay, f"a:pay:{oid}:{self.store.receipts(ADMIN, oid)[-1]['id']}")
+        before = len(self.session.calls)
+        await self.event(ADMIN, callback=pay)
+        order = self.store.admin_order(ADMIN, oid)
+        self.assertEqual(order["status"], "paid")
+        self.assertIsNone(order["payment_ref"])
+        self.assertEqual(self.store.session(ADMIN), ("admin_gift", {"oid": oid}))
+        self.assertIn("Надішліть посилання для активації", self.panel(ADMIN).text)
+        self.assertEqual(self.panel(ADMIN).message_id, panel.message_id)
+        self.assertFalse(any(isinstance(m, (SendPhoto, SendDocument)) for m in self.session.calls[before:]))
+        queued = self.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+        await self.event(ADMIN, callback=pay)
+        self.assertEqual(queued, self.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
+        back = self.panel(ADMIN).reply_markup.inline_keyboard[0][0].callback_data
+        await self.event(ADMIN, callback=back)
+        self.assertIsNone(self.store.session(ADMIN))
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "paid")
+        await self.event(ADMIN, callback=f"a:gift:{oid}")
+        self.assertEqual(self.store.session(ADMIN)[0], "admin_gift")
+
+    async def test_stale_receipt_verification_cannot_confirm_new_receipt(self):
+        oid = await self.new_review()
+        rid = self.store.receipts(ADMIN, oid)[-1]["id"]
+        self.store.reject_receipt(ADMIN, oid, "Unreadable")
+        self.store.add_receipt(BUYER, oid, 123, "new-file", "new-unique", "photo")
+        await self.event(ADMIN, callback=f"a:pay:{oid}:{rid}")
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "review")
+        self.assertIsNone(self.store.session(ADMIN))
+        self.assertIn("нову квитанцію", self.panel(ADMIN).text)
+
+    async def test_legacy_payment_input_accepts_gift_without_recording_it_as_bank_reference(self):
+        oid = await self.new_review()
+        rid = self.store.receipts(ADMIN, oid)[-1]["id"]
+        self.store.set_session(ADMIN, "admin_pay", {"oid": oid, "receipt_id": rid})
+        await self.event(ADMIN, "https://example.com/gift/legacy")
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "paid")
+        self.assertIsNone(self.store.admin_order(ADMIN, oid)["payment_ref"])
+        self.assertEqual(self.store.session(ADMIN)[0], "gift_confirm")
+        self.assertIn("https://example.com/gift/legacy", self.panel(ADMIN).text)
+
+    async def test_legacy_payment_input_requires_valid_gift_and_current_receipt(self):
+        oid = await self.new_review()
+        rid = self.store.receipts(ADMIN, oid)[-1]["id"]
+        self.store.set_session(ADMIN, "admin_pay", {"oid": oid, "receipt_id": rid})
+        await self.event(ADMIN, "BANK-1234")
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "review")
+        self.store.reject_receipt(ADMIN, oid, "Unreadable")
+        self.store.add_receipt(BUYER, oid, 123, "new-file", "new-unique", "photo")
+        self.store.set_session(ADMIN, "admin_pay", {"oid": oid, "receipt_id": rid})
+        await self.event(ADMIN, "https://example.com/gift/legacy")
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "review")
+        self.assertIn("нову квитанцію", self.panel(ADMIN).text)
+
+    async def test_buyer_cannot_verify_payment_with_new_button(self):
+        oid = await self.new_review()
+        rid = self.store.receipts(ADMIN, oid)[-1]["id"]
+        await self.event(BUYER, callback=f"a:pay:{oid}:{rid}")
+        self.assertEqual(self.store.admin_order(ADMIN, oid)["status"], "review")
+        self.assertIsNone(self.store.session(BUYER))
 
     async def test_receipt_view_attachments_are_removed_on_back(self):
         oid = await self.new_review()
@@ -235,8 +302,6 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     async def ready_gift(self):
         oid = await self.new_review()
         await self.event(ADMIN, callback=f"a:pay:{oid}")
-        await self.event(ADMIN, "BANK-1001")
-        await self.event(ADMIN, callback=f"a:gift:{oid}")
         await self.event(ADMIN, "https://example.com/gift/123")
         await self.event(ADMIN, callback=f"a:send:{oid}:{self.store.session(ADMIN)[1]['nonce']}")
         return oid
@@ -246,9 +311,7 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.own_order(BUYER, oid)["status"], "review")
         self.assertEqual(self.store.own_order(BUYER, oid)["source"], "ad_campaign_a")
         await self.event(ADMIN, callback=f"a:pay:{oid}")
-        await self.event(ADMIN, "BANK-1001")
         self.assertEqual(self.store.own_order(BUYER, oid)["status"], "paid")
-        await self.event(ADMIN, callback=f"a:gift:{oid}")
         await self.event(ADMIN, "https://example.com/gift/123")
         self.assertEqual(self.store.own_order(BUYER, oid)["status"], "paid")
         await self.event(ADMIN, callback=f"a:send:{oid}:{self.store.session(ADMIN)[1]['nonce']}")

@@ -187,6 +187,16 @@ class StoreTests(unittest.TestCase):
             self.store.confirm_payment(ADMIN, other, "  bank-1 ")
         self.assertEqual(self.store.own_order(OTHER, other)["status"], "review")
 
+    def test_payment_can_be_confirmed_without_bank_reference_for_multiple_orders(self):
+        for uid in (BUYER, OTHER):
+            oid = self.reviewed(uid)
+            self.store.confirm_payment(ADMIN, oid)
+            order = self.store.admin_order(ADMIN, oid)
+            self.assertEqual(order["status"], "paid")
+            self.assertIsNone(order["payment_ref"])
+            self.assertEqual(order["paid_by"], ADMIN)
+            self.assertIsNotNone(order["paid_at"])
+
     def test_payment_cannot_be_confirmed_twice(self):
         oid = self.paid()
         before = self.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]

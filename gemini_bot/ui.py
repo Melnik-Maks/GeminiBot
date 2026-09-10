@@ -298,16 +298,25 @@ class UI:
             await self.list_orders(uid, max(0, int(parts[3])), True, parts[2])
         elif action == "order":
             await self.show_order(uid, int(parts[2]), True)
-        elif action in ("pay", "reject", "gift", "message", "refund"):
+        elif action == "pay":
             oid = int(parts[2])
             order = s.admin_order(uid, oid)
-            expected = {"pay": ("review",), "reject": ("review",), "gift": ("paid",),
+            if order["status"] == "review":
+                receipt_id = int(parts[3]) if len(parts) > 3 else order["receipt_id"]
+                s.confirm_payment(uid, oid, receipt_id=receipt_id)
+            elif order["status"] != "paid":
+                raise ShopError("Статус замовлення змінився. Оновіть картку.")
+            await self.prompt(uid, "admin_gift", {"oid": oid},
+                              f"✅ Оплату замовлення №{oid} підтверджено.\n\n"
+                              "🎁 Надішліть посилання для активації (HTTPS).\nДалі буде попередній перегляд перед відправленням покупцю.")
+        elif action in ("reject", "gift", "message", "refund"):
+            oid = int(parts[2])
+            order = s.admin_order(uid, oid)
+            expected = {"reject": ("review",), "gift": ("paid",),
                         "refund": ("paid", "issued", "activated")}
             if action in expected and order["status"] not in expected[action]:
                 raise ShopError("Статус замовлення змінився. Оновіть картку.")
             prompts = {
-                "pay": f"Замовлення №{oid} · {order['price']} грн.\nПеревірте зарахування саме цієї суми у своєму банку.\n"
-                       "Для підтвердження надішліть унікальний ідентифікатор операції зарахування з банку.",
                 "reject": f"Вкажіть причину відхилення квитанції до замовлення №{oid}. Покупець отримає цей текст.",
                 "gift": f"Надішліть подарункове HTTPS-посилання для замовлення №{oid}.\nДалі буде попередній перегляд.",
                 "message": f"Надішліть текст, фото або PDF для покупця замовлення №{oid}.",
@@ -315,7 +324,7 @@ class UI:
                           "Бот не переказує кошти. Після фактичного повернення надішліть ідентифікатор операції повернення.",
             }
             details = {"oid": oid}
-            if action in ("pay", "reject"):
+            if action == "reject":
                 receipt = s.receipts(uid, oid)[-1]
                 details["receipt_id"] = receipt["id"]
                 method = self.bot.send_photo if receipt["kind"] == "photo" else self.bot.send_document
@@ -499,14 +508,17 @@ class UI:
         elif kind == "support":
             # Redirect a session opened before direct contact was introduced.
             await self.show_contact(uid, data["oid"])
-        elif kind == "admin_pay":
-            s.confirm_payment(uid, data["oid"], text, data["receipt_id"])
-            await self.show_order(uid, data["oid"], True)
         elif kind == "admin_reject":
             s.reject_receipt(uid, data["oid"], text, data["receipt_id"])
             await self.show_order(uid, data["oid"], True)
-        elif kind == "admin_gift":
+        elif kind in ("admin_gift", "admin_pay"):
             oid = data["oid"]
+            if kind == "admin_pay":
+                # Resume input opened by the old verification button before deployment.
+                s.validate_gift(text)
+                if s.admin_order(uid, oid)["status"] == "review":
+                    s.confirm_payment(uid, oid, receipt_id=data["receipt_id"])
+                s.set_session(uid, "admin_gift", {"oid": oid})
             url = s.prepare_gift(uid, oid, text)
             order = s.admin_order(uid, oid)
             await self.send(uid, f"🎁 <b>Перевірте перед відправленням</b>\nЗамовлення №{oid}\n"

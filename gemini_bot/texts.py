@@ -51,7 +51,7 @@ def order_keys(order, admin=False, *, contact_url=None, back_to=None):
     rows = []
     if admin:
         if status == "review":
-            rows.extend([(("✅ Перевірив зарахування", f"a:pay:{oid}"),),
+            rows.extend([(("✅ Перевірив зарахування", f"a:pay:{oid}:{order['receipt_id']}"),),
                          (("❌ Відхилити квитанцію", f"a:reject:{oid}"),)])
         if status == "paid":
             rows.append((("🎁 Видати посилання", f"a:gift:{oid}"),))

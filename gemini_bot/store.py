@@ -212,7 +212,9 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO ui_state VALUES (?,?)", (uid, json.dumps(data)))
 
     def _order(self, oid):
-        row = self.db.execute("SELECT o.*,u.name,u.username FROM orders o JOIN users u ON u.id=o.user_id WHERE o.id=?", (oid,)).fetchone()
+        row = self.db.execute("""SELECT o.*,u.name,u.username,
+                              (SELECT MAX(id) FROM receipts WHERE order_id=o.id) AS receipt_id
+                              FROM orders o JOIN users u ON u.id=o.user_id WHERE o.id=?""", (oid,)).fetchone()
         if not row:
             raise ShopError("Замовлення не знайдено.")
         return dict(row)
@@ -309,9 +311,9 @@ class Store:
             raise ShopError("Вкажіть ідентифікатор банківської операції: 4–150 символів.")
         return value
 
-    def confirm_payment(self, actor, oid, reference, receipt_id=None):
+    def confirm_payment(self, actor, oid, reference=None, receipt_id=None):
         self.admin(actor)
-        ref = self.reference(reference)
+        ref = self.reference(reference) if reference is not None else None
         try:
             with self.transaction():
                 order = self._order(oid)
