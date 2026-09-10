@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up GeminiBot SQLite database
+
+[Service]
+Type=oneshot
+User=geminibot
+Group=geminibot
+WorkingDirectory=/opt/gemini-bot
+ExecStart=/opt/gemini-bot/.venv/bin/python -m gemini_bot.backup --database /opt/gemini-bot/data/bot.sqlite3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gemini-bot/data /opt/gemini-bot/backups

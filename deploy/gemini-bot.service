@@ -1,0 +1,22 @@
+[Unit]
+Description=Gemini Telegram subscription shop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=geminibot
+Group=geminibot
+WorkingDirectory=/opt/gemini-bot
+ExecStart=/opt/gemini-bot/.venv/bin/python -m gemini_bot
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/gemini-bot/data
+
+[Install]
+WantedBy=multi-user.target
