@@ -43,12 +43,12 @@ class Navigation:
         state["extras"] = remaining
         self.store.save_screen(uid, state)
 
-    async def render(self, uid, text, markup):
+    async def render(self, uid, text, markup, *, new_message=False):
         state = self.store.screen(uid)
         previous = state.get("message_id")
         options = dict(text=text, parse_mode="HTML", link_preview_options={"is_disabled": True},
                        reply_markup=InlineKeyboardMarkup.model_validate(markup))
-        if previous and not state.get("media"):
+        if previous and not state.get("media") and not new_message:
             try:
                 return await self.bot.edit_message_text(chat_id=uid, message_id=previous, **options)
             except TelegramBadRequest as exc:

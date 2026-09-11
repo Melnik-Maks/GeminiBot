@@ -126,6 +126,22 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.panel(BUYER).message_id, message_id)
         self.assertEqual(len([m for m in self.session.calls if isinstance(m, SendMessage) and m.chat_id == BUYER]), 1)
 
+    async def test_start_and_menu_send_visible_reply_then_buttons_edit_it(self):
+        await self.event(BUYER, "/start")
+        for command in ("/start", "/menu"):
+            previous = self.panel(BUYER).message_id
+            before = len(self.session.calls)
+            await self.event(BUYER, command)
+            current = self.panel(BUYER).message_id
+            self.assertNotEqual(current, previous)
+            self.assertNotIn((BUYER, previous), self.session.messages)
+            calls = self.session.calls[before:]
+            self.assertEqual(len([m for m in calls if isinstance(m, SendMessage) and m.chat_id == BUYER]), 1)
+            self.assertLess(next(i for i, m in enumerate(calls) if isinstance(m, SendMessage)),
+                            next(i for i, m in enumerate(calls) if isinstance(m, DeleteMessage)))
+            await self.event(BUYER, callback="instructions")
+            self.assertEqual(self.panel(BUYER).message_id, current)
+
     async def test_receipt_back_clears_input_without_cancelling_order(self):
         await self.event(BUYER, "/start")
         await self.event(BUYER, callback="buy")

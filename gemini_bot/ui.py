@@ -83,8 +83,8 @@ class UI:
         self.router.callback_query.register(self.callback)
         self.last_action = {}
 
-    async def send(self, uid, text, markup=None):
-        return await self.navigation.render(uid, text, markup or BACK)
+    async def send(self, uid, text, markup=None, *, new_message=False):
+        return await self.navigation.render(uid, text, markup or BACK, new_message=new_message)
 
     def register(self, user, source="direct"):
         self.store.user(user.id, user.full_name, user.username, source)
@@ -101,7 +101,7 @@ class UI:
         self.last_action[uid] = now
         return False
 
-    async def home(self, uid):
+    async def home(self, uid, *, new_message=False):
         self.store.clear_session(uid)
         text = (f"✨ <b>{escape(PRODUCT)}</b>\n\n"
                 "Активація подарунковим посиланням на вашому особистому Google-акаунті.\n"
@@ -116,7 +116,8 @@ class UI:
                 f"⏱ Час видачі: {escape(self.store.setting('delivery_time'))}")
         if not self.store.setting("sales_open"):
             text += "\n\n⏸ Продажі зараз призупинено. Підтримка працює."
-        await self.send(uid, text, home_keys(uid in self.store.config.admin_ids, contact_url=self.store.config.admin_contact_url))
+        await self.send(uid, text, home_keys(uid in self.store.config.admin_ids, contact_url=self.store.config.admin_contact_url),
+                        new_message=new_message)
 
     async def show_order(self, uid, oid, admin=False):
         order = self.store.admin_order(uid, oid) if admin else self.store.own_order(uid, oid)
@@ -460,7 +461,7 @@ class UI:
             await self.navigation.begin(uid)
             if command in ("/start", "/menu"):
                 self.store.resume_recipient(uid)
-                await self.home(uid)
+                await self.home(uid, new_message=True)
             elif command == "/cancel":
                 await self.handle_callback(uid, self.cancel_target(uid))
             elif command == "/admin":
