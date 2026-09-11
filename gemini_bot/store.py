@@ -242,9 +242,10 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO outbox(event_key,chat_id,method,payload,order_id,purpose) VALUES (?,?,?,?,?,?)",
                         (key, chat_id, method, json.dumps(body, ensure_ascii=False), oid, purpose))
 
-    def notify_admins(self, key, text, markup=None, oid=None):
+    def notify_admins(self, key, text, markup=None, oid=None, *, exclude=None):
         for admin in self.config.admin_ids:
-            self.queue(f"{key}:admin:{admin}", admin, text, markup, oid=oid)
+            if admin != exclude:
+                self.queue(f"{key}:admin:{admin}", admin, text, markup, oid=oid)
 
     def new_order(self, uid):
         with self.transaction():
@@ -328,7 +329,8 @@ class Store:
                 self.queue(f"paid:{oid}", order["user_id"],
                            f"✅ Оплату замовлення №{oid} підтверджено.\nАдміністратор готує подарункове посилання.\n"
                            f"Час видачі: {escape(order['delivery_time'])}", order_keys(order, contact_url=self.config.admin_contact_url), oid=oid)
-                self.notify_admins(f"paid:{oid}", f"✅ Замовлення №{oid}: оплату підтверджено. Можна видати посилання.", order_keys(order, True), oid)
+                self.notify_admins(f"paid:{oid}", f"✅ Замовлення №{oid}: оплату підтверджено. Можна видати посилання.",
+                                   order_keys(order, True), oid, exclude=actor)
                 self.audit(actor, oid, "payment_confirmed")
                 self.clear_session(actor)
         except sqlite3.IntegrityError:

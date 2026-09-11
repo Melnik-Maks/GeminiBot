@@ -277,6 +277,22 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.event(ADMIN, callback=f"a:gift:{oid}")
         self.assertEqual(self.store.session(ADMIN)[0], "admin_gift")
 
+    async def test_payment_confirmation_does_not_send_duplicate_admin_notification(self):
+        oid = await self.new_review()
+        await self.drain()
+        await self.event(ADMIN, callback=f"a:order:{oid}")
+        previous = self.panel(ADMIN).message_id
+        before = len(self.session.calls)
+        await self.event(ADMIN, callback=f"a:pay:{oid}")
+        await self.drain()
+        self.assertEqual(self.panel(ADMIN).message_id, previous)
+        self.assertIn("Надішліть посилання для активації", self.panel(ADMIN).text)
+        self.assertEqual(self.store.session(ADMIN), ("admin_gift", {"oid": oid}))
+        calls = self.session.calls[before:]
+        self.assertFalse(any(isinstance(m, SendMessage) and m.chat_id == ADMIN for m in calls))
+        self.assertEqual(len([m for m in calls if isinstance(m, SendMessage) and m.chat_id == BUYER
+                             and "Оплату замовлення" in m.text]), 1)
+
     async def test_stale_receipt_verification_cannot_confirm_new_receipt(self):
         oid = await self.new_review()
         rid = self.store.receipts(ADMIN, oid)[-1]["id"]

@@ -204,6 +204,15 @@ class StoreTests(unittest.TestCase):
             self.store.confirm_payment(ADMIN, oid, "bank-new")
         self.assertEqual(before, self.store.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0])
 
+    def test_payment_notifies_buyer_and_other_admins_but_not_confirming_admin(self):
+        self.store.config = replace(self.store.config, admin_ids=(ADMIN, 400))
+        oid = self.reviewed()
+        self.store.confirm_payment(ADMIN, oid)
+        recipients = [row[0] for row in self.store.db.execute(
+            "SELECT chat_id FROM outbox WHERE event_key=? OR event_key LIKE ?",
+            (f"paid:{oid}", f"paid:{oid}:admin:%"))]
+        self.assertCountEqual(recipients, [BUYER, 400])
+
     def test_all_admin_actions_reject_buyer(self):
         oid = self.reviewed()
         operations = [
