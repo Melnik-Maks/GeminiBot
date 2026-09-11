@@ -1,12 +1,13 @@
 import asyncio
 from datetime import datetime, timezone
 import unittest
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from aiogram.methods import (AnswerCallbackQuery, DeleteMessage, EditMessageReplyMarkup,
-                             EditMessageText, SendDocument, SendMessage, SendPhoto)
+from aiogram.methods import (AnswerCallbackQuery, DeleteMessage, EditMessageCaption, EditMessageReplyMarkup,
+                             EditMessageText, SendDocument, SendMediaGroup, SendMessage, SendPhoto)
 from aiogram.types import Chat, Message, Update
 
 from gemini_bot.delivery import deliver_batch
@@ -23,6 +24,7 @@ class FakeSession(BaseSession):
         self.messages = {}
         self.edit_error = None
         self.delete_error = None
+        self.next_message_id = 0
 
     async def close(self):
         pass
@@ -36,15 +38,17 @@ class FakeSession(BaseSession):
                 raise TelegramBadRequest(method=method, message=self.delete_error)
             self.messages.pop((int(method.chat_id), method.message_id), None)
             return True
-        if isinstance(method, (EditMessageText, EditMessageReplyMarkup)):
+        if isinstance(method, (EditMessageText, EditMessageCaption, EditMessageReplyMarkup)):
             key = (int(method.chat_id), method.message_id)
-            if isinstance(method, EditMessageText) and self.edit_error:
+            if isinstance(method, (EditMessageText, EditMessageCaption)) and self.edit_error:
                 raise TelegramBadRequest(method=method, message=self.edit_error)
             if key not in self.messages:
                 raise TelegramBadRequest(method=method, message="message to edit not found")
             changes = {"reply_markup": method.reply_markup}
             if isinstance(method, EditMessageText):
                 changes["text"] = method.text
+            elif isinstance(method, EditMessageCaption):
+                changes["caption"] = method.caption
             result = self.messages[key].model_copy(update=changes)
             if result == self.messages[key]:
                 raise TelegramBadRequest(method=method, message="message is not modified")
@@ -52,13 +56,32 @@ class FakeSession(BaseSession):
             return result
         if self.fail_gift and isinstance(method, SendMessage) and "example.com/gift" in method.text:
             raise self.fail_gift
+        if isinstance(method, SendMediaGroup):
+            results = []
+            for item in method.media:
+                self.next_message_id += 1
+                self.assert_asset(item.media)
+                result = Message(message_id=self.next_message_id, date=datetime.now(timezone.utc),
+                                 chat=Chat(id=int(method.chat_id), type="private"),
+                                 photo=[{"file_id": "album-photo", "file_unique_id": str(self.next_message_id),
+                                         "width": 400, "height": 800}])
+                self.messages[(int(method.chat_id), result.message_id)] = result
+                results.append(result)
+            return results
         if isinstance(method, (SendMessage, SendPhoto, SendDocument)):
-            result = Message(message_id=len(self.calls), date=datetime.now(timezone.utc),
+            self.next_message_id += 1
+            if isinstance(method, SendPhoto):
+                self.assert_asset(method.photo)
+            result = Message(message_id=self.next_message_id, date=datetime.now(timezone.utc),
                              chat=Chat(id=int(method.chat_id), type="private"), text=getattr(method, "text", None),
                              caption=getattr(method, "caption", None), reply_markup=method.reply_markup)
             self.messages[(int(method.chat_id), result.message_id)] = result
             return result
         raise AssertionError(type(method).__name__)
+
+    def assert_asset(self, media):
+        if hasattr(media, "path"):
+            assert Path(media.path).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
     async def stream_content(self, *args, **kwargs):
         yield b""
@@ -115,16 +138,26 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     def panel(self, uid):
         return self.session.messages[(uid, self.store.screen(uid)["message_id"])]
 
-    async def test_menu_navigation_edits_one_message_and_goes_back(self):
+    async def test_home_photo_and_instruction_album_are_replaced_on_back(self):
         await self.event(BUYER, "/start")
         message_id = self.panel(BUYER).message_id
         await self.event(BUYER, callback="instructions")
-        self.assertEqual(self.panel(BUYER).message_id, message_id)
+        self.assertNotEqual(self.panel(BUYER).message_id, message_id)
+        self.assertNotIn((BUYER, message_id), self.session.messages)
+        album = next(m for m in self.session.calls if isinstance(m, SendMediaGroup))
+        self.assertEqual([Path(m.media.path).name for m in album.media],
+                         [f"12pro{i}.png" for i in range(1, 5)])
+        album_ids = self.store.screen(BUYER)["extras"][:]
+        self.assertEqual(len(album_ids), 4)
+        instruction_id = self.panel(BUYER).message_id
         back = next(b for row in self.panel(BUYER).reply_markup.inline_keyboard for b in row if b.text == "← Назад")
         await self.event(BUYER, callback=back.callback_data)
-        self.assertIn("Вартість", self.panel(BUYER).text)
-        self.assertEqual(self.panel(BUYER).message_id, message_id)
-        self.assertEqual(len([m for m in self.session.calls if isinstance(m, SendMessage) and m.chat_id == BUYER]), 1)
+        self.assertIn("Вартість", self.panel(BUYER).caption)
+        self.assertNotIn((BUYER, instruction_id), self.session.messages)
+        self.assertTrue(all((BUYER, mid) not in self.session.messages for mid in album_ids))
+        self.assertEqual(self.store.screen(BUYER)["extras"], [])
+        photos = [m for m in self.session.calls if isinstance(m, SendPhoto) and m.chat_id == BUYER]
+        self.assertEqual([Path(m.photo.path).name for m in photos], ["a1.png", "a1.png"])
 
     async def test_start_and_menu_send_visible_reply_then_buttons_edit_it(self):
         await self.event(BUYER, "/start")
@@ -136,11 +169,38 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(current, previous)
             self.assertNotIn((BUYER, previous), self.session.messages)
             calls = self.session.calls[before:]
-            self.assertEqual(len([m for m in calls if isinstance(m, SendMessage) and m.chat_id == BUYER]), 1)
-            self.assertLess(next(i for i, m in enumerate(calls) if isinstance(m, SendMessage)),
+            self.assertEqual(len([m for m in calls if isinstance(m, SendPhoto) and m.chat_id == BUYER]), 1)
+            self.assertLess(next(i for i, m in enumerate(calls) if isinstance(m, SendPhoto)),
                             next(i for i, m in enumerate(calls) if isinstance(m, DeleteMessage)))
-            await self.event(BUYER, callback="instructions")
+            await self.event(BUYER, callback="home")
             self.assertEqual(self.panel(BUYER).message_id, current)
+
+    async def test_instruction_album_cleanup_survives_ui_restart(self):
+        await self.event(BUYER, "/start")
+        await self.event(BUYER, callback="instructions")
+        old_ids = self.store.screen(BUYER)["extras"] + [self.panel(BUYER).message_id]
+        self.ui = UI(self.bot, self.store)
+        self.dispatcher = Dispatcher()
+        self.dispatcher.include_router(self.ui.router)
+        await self.event(BUYER, "/start")
+        self.assertTrue(all((BUYER, mid) not in self.session.messages for mid in old_ids))
+        self.assertIn("Вартість", self.panel(BUYER).caption)
+        self.assertEqual(self.store.screen(BUYER)["extras"], [])
+
+    async def test_home_caption_fits_telegram_with_long_delivery_time(self):
+        self.store.set_setting(ADMIN, "delivery_time", "x" * 300)
+        await self.event(BUYER, "/start")
+        self.assertLessEqual(len(self.panel(BUYER).caption), 1024)
+
+    async def test_uneditable_home_photo_is_replaced_and_old_buttons_retired(self):
+        await self.event(BUYER, "/start")
+        previous = self.panel(BUYER).message_id
+        self.session.edit_error = "message can't be edited"
+        self.session.delete_error = "message can't be deleted"
+        await self.event(BUYER, callback="home")
+        self.assertNotEqual(self.panel(BUYER).message_id, previous)
+        self.assertIsNone(self.session.messages[(BUYER, previous)].reply_markup)
+        self.assertIn("Вартість", self.panel(BUYER).caption)
 
     async def test_receipt_back_clears_input_without_cancelling_order(self):
         await self.event(BUYER, "/start")
@@ -269,10 +329,11 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_uneditable_menu_is_replaced_after_successful_send(self):
         await self.event(BUYER, "/start")
+        await self.event(BUYER, callback="buy")
         previous = self.panel(BUYER).message_id
         start = len(self.session.calls)
         self.session.edit_error = "message can't be edited"
-        await self.event(BUYER, callback="instructions")
+        await self.event(BUYER, callback="orders:0")
         self.assertNotEqual(self.panel(BUYER).message_id, previous)
         self.assertNotIn((BUYER, previous), self.session.messages)
         calls = self.session.calls[start:]
@@ -284,7 +345,7 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         previous = self.panel(BUYER).message_id
         await self.event(BUYER, callback="home")
         self.assertEqual(self.panel(BUYER).message_id, previous)
-        self.assertEqual(len([m for m in self.session.calls if isinstance(m, SendMessage) and m.chat_id == BUYER]), 1)
+        self.assertEqual(len([m for m in self.session.calls if isinstance(m, SendPhoto) and m.chat_id == BUYER]), 1)
 
     async def test_old_undeletable_menu_has_buttons_removed(self):
         await self.event(BUYER, "/start")
@@ -357,14 +418,14 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_contact_buttons_open_chat_without_callback(self):
         await self.event(BUYER, "/start")
         home = self.session.calls[-1]
-        self.assertIn("1–5 хв", home.text)
+        self.assertIn("1–5 хв", home.caption)
         buttons = [b for row in home.reply_markup.inline_keyboard for b in row]
         contact = next(b for b in buttons if "Написати адміну" in b.text)
         self.assertEqual(contact.url, "https://t.me/shop_admin")
         self.assertIsNone(contact.callback_data)
         self.assertFalse(any(b.callback_data == "terms" for b in buttons))
         await self.event(BUYER, callback="buy")
-        self.assertNotIn("Умови", self.session.calls[-1].text)
+        self.assertNotIn("Умови", self.panel(BUYER).text)
         await self.event(BUYER, callback="buy_confirm")
         order = self.session.calls[-1]
         self.assertIn("1–5 хв", order.text)

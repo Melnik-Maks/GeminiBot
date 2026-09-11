@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
@@ -15,6 +16,7 @@ from .texts import INSTRUCTIONS, PRODUCT, STATUS, back_keys, home_keys, keyboard
 log = logging.getLogger(__name__)
 BACK = back_keys()
 CANCEL = keyboard((("← Назад", "cancel_input"), ("🏠 Головна", "home")))
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
 
 def attachment(message, receipt=False):
@@ -83,8 +85,8 @@ class UI:
         self.router.callback_query.register(self.callback)
         self.last_action = {}
 
-    async def send(self, uid, text, markup=None, *, new_message=False):
-        return await self.navigation.render(uid, text, markup or BACK, new_message=new_message)
+    async def send(self, uid, text, markup=None, *, new_message=False, photo=None):
+        return await self.navigation.render(uid, text, markup or BACK, new_message=new_message, photo=photo)
 
     def register(self, user, source="direct"):
         self.store.user(user.id, user.full_name, user.username, source)
@@ -117,7 +119,7 @@ class UI:
         if not self.store.setting("sales_open"):
             text += "\n\n⏸ Продажі зараз призупинено. Підтримка працює."
         await self.send(uid, text, home_keys(uid in self.store.config.admin_ids, contact_url=self.store.config.admin_contact_url),
-                        new_message=new_message)
+                        new_message=new_message, photo=ASSETS / "a1.png")
 
     async def show_order(self, uid, oid, admin=False):
         order = self.store.admin_order(uid, oid) if admin else self.store.own_order(uid, oid)
@@ -231,7 +233,8 @@ class UI:
         elif data in ("home", "cancel_input"):
             await self.home(uid)
         elif data == "instructions":
-            await self.send(uid, f"📖 <b>Як активувати підписку</b>\n\n{INSTRUCTIONS}", BACK)
+            await self.navigation.album(uid, [ASSETS / f"12pro{i}.png" for i in range(1, 5)])
+            await self.send(uid, f"📖 <b>Як активувати підписку</b>\n\n{INSTRUCTIONS}", BACK, new_message=True)
         elif data == "terms":
             # An old message may still contain this removed button.
             await self.home(uid)

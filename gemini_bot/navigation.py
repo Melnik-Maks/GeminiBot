@@ -2,7 +2,7 @@
 import logging
 
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InputMediaPhoto
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,7 @@ class Navigation:
             previous = state.get("message_id")
             if previous and previous != clicked.message_id:
                 state.setdefault("extras", []).append(previous)
+                state.pop("photo", None)
             state["message_id"] = clicked.message_id
             state["media"] = not bool(getattr(clicked, "text", None))
         remaining = []
@@ -43,14 +44,19 @@ class Navigation:
         state["extras"] = remaining
         self.store.save_screen(uid, state)
 
-    async def render(self, uid, text, markup, *, new_message=False):
+    async def render(self, uid, text, markup, *, new_message=False, photo=None):
         state = self.store.screen(uid)
         previous = state.get("message_id")
-        options = dict(text=text, parse_mode="HTML", link_preview_options={"is_disabled": True},
-                       reply_markup=InlineKeyboardMarkup.model_validate(markup))
-        if previous and not state.get("media") and not new_message:
+        options = dict(parse_mode="HTML", reply_markup=InlineKeyboardMarkup.model_validate(markup))
+        if photo:
+            options["caption"] = text
+        else:
+            options.update(text=text, link_preview_options={"is_disabled": True})
+        can_edit = state.get("photo") == str(photo) if photo else not state.get("media")
+        if previous and can_edit and not new_message:
             try:
-                return await self.bot.edit_message_text(chat_id=uid, message_id=previous, **options)
+                method = self.bot.edit_message_caption if photo else self.bot.edit_message_text
+                return await method(chat_id=uid, message_id=previous, **options)
             except TelegramBadRequest as exc:
                 reason = exc.message.lower()
                 if "message is not modified" in reason:
@@ -62,13 +68,24 @@ class Navigation:
                     raise
         # Send successfully before removing the old screen, so failures leave
         # the existing navigation available. Never delete user-sent messages.
-        message = await self.bot.send_message(chat_id=uid, **options)
-        state.update(message_id=message.message_id, media=False)
+        if photo:
+            message = await self.bot.send_photo(chat_id=uid, photo=FSInputFile(photo), **options)
+        else:
+            message = await self.bot.send_message(chat_id=uid, **options)
+        state.update(message_id=message.message_id, media=bool(photo), photo=str(photo) if photo else None)
         self.store.save_screen(uid, state)
         if previous and previous != message.message_id and not await self.remove(uid, previous):
             state.setdefault("extras", []).append(previous)
             self.store.save_screen(uid, state)
         return message
+
+    async def album(self, uid, paths):
+        messages = await self.bot.send_media_group(
+            chat_id=uid, media=[InputMediaPhoto(media=FSInputFile(path)) for path in paths])
+        state = self.store.screen(uid)
+        state.setdefault("extras", []).extend(message.message_id for message in messages)
+        self.store.save_screen(uid, state)
+        return messages
 
     async def extra(self, uid, method, **kwargs):
         message = await method(chat_id=uid, **kwargs)
